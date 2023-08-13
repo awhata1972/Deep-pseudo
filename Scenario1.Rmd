@@ -1,0 +1,263 @@
+---
+title: "Deep pseudo"
+output: html_document
+date: 
+---
+```{r}
+library(reticulate)
+
+```
+
+```{r}
+library(tidyverse)
+conda_list()
+#Using it
+conda_list()[[2]][2] %>% 
+  use_condaenv(required = TRUE)
+
+```
+
+```{python}
+import tensorflow as tf
+from tensorflow.python.keras.layers import Input, Dense
+from keras.models import Model, load_model
+import pandas as pd
+import numpy as np
+```
+
+```{r}
+library(tensorflow)
+getOption("max.print")
+#rm(list=ls())
+library(keras)
+library(pseudo)
+library(survivalROC)
+library(survival)
+library(survcomp)
+library(survAUC)
+library(reticulate)
+library(torch)
+library(data.table)
+library(tidyverse)
+library(reticulate)
+library(tensorflow)
+library(keras)
+library(coxphw)
+library(Hmisc)
+```
+
+```{r}
+getPseudoConditional <- function(t, d, qt){
+  #browser()
+  s <- c(0, qt)  
+  n=length(t)
+  ns=length(s)-1  # the number of intervals
+  D <- do.call(cbind, lapply(1:ns, function(j)  (s[j] < t) * (t <= s[j+1]) * (d == 1)))
+  R <- do.call(cbind, lapply(1:ns, function(j) ifelse(s[j] < t, 1, 0)))
+  Delta<-do.call(cbind, lapply(1:ns, function(j) pmin(t,s[j+1])-s[j]))
+  
+  
+  # format into long formate
+  dd.tmp=cbind.data.frame(id=rep(1:n,ns),s=rep(c(0,qt[-length(qt)]), each=n), y=c(R*Delta),d=c(D))
+  
+  dd=dd.tmp[dd.tmp$y>0,]
+  pseudost=rep(NA, nrow(dd))
+  for (j in 1:ns){
+    index= (dd$s==s[j])
+    dds=dd[index,]
+    pseudost[index]=pseudosurv(time=dds$y, event=dds$d, tmax=s[j+1]-s[j])$pseudo
+    print(j)
+  }
+  dd$pseudost=pseudost  
+  return(dd[,c(1,2,5)])
+}
+
+```
+
+```{r}
+#conda_install("r-reticulate", "tensorflow")
+library(tensorflow)
+#----------------------------------------------------------------------------------------
+# Another example of a neural network with one hidden layer implemented in R keras in the paper
+#-----------------------------------------------------------------------------------------
+pseudoDNN.train <- function(x_train, y_train){
+  
+  model <- keras_model_sequential() %>%
+    layer_dense(units = 64, kernel_regularizer = regularizer_l2(0.0001), activation = "relu",
+                input_shape = dim(x_train)[[2]]) %>%
+    layer_dense(units = 32, kernel_regularizer = regularizer_l2(0.01),
+                activation = "relu") %>%
+        layer_dense(units = 16, kernel_regularizer = regularizer_l2(0.01),
+                activation = "relu") %>%
+    layer_dense(units = 8, kernel_regularizer = regularizer_l2(0.01),
+                activation = "relu") %>%
+    layer_dense(units = 1, activation='sigmoid')
+  
+  model %>% compile(
+    optimizer =optimizer_adamax(learning_rate = 0.0025),
+    loss = "mse",
+    metrics = c("mae")
+  )
+  model %>% fit(x_train, y_train,
+                epochs = 1000, batch_size = 64,
+                verbose = 0)
+  
+  model
+}
+#----------------------------------------------------------------------------
+#prediction based on a keras model
+#----------------------------------------------------------------------------
+pseudoDNN.predict <- function(model, x_test){
+  ypred <- model %>% predict(x_test)
+  
+}
+
+```
+
+```{r}
+##Scenario 1-  Log-logistic times - less predictive covariates
+## Repeated simulation
+simulate_data <- function(seed) {
+  library(survsim)
+  N=100 #number of patients
+  set.seed(123)
+  df.tf<-simple.surv.sim(#baseline time fixed
+    n=N, foltime=500,
+    dist.ev=c('llogistic'),
+    anc.ev=c(0.68), beta0.ev=c(5.8),
+    anc.cens=1.2,
+    beta0.cens=7.4,
+    z=NULL,
+    beta=list(c(-0.2),c(0)),
+    x=list(c("bern", 0.5),
+           c("normal", 70, 13)))
+  names(df.tf)[c(1,6,7)]<-c("id","X1","X2")
+  set.seed(123)
+  nft<-sample(1:10,
+              N,replace=T)#number of follow up time points
+  X3<-round(abs(rnorm(sum(nft)+N,
+                      mean=100,sd=40)),1)
+  time<-NA
+  id<-NA
+  i=0
+  for(n in nft){
+    i=i+1
+    time.n<-sample(1:500,n)
+    time.n<-c(0,sort(time.n))
+    time<-c(time,time.n)
+    id.n<-rep(i,n+1)
+    id<-c(id,id.n)
+  }
+  df.td <- cbind(data.frame(id,time)[-1,],X3)
+  
+  df<-tmerge(df.tf,df.tf,id=id,
+             endpt=event(stop,status))
+  df <- tmerge(df,df.td,id=id,
+               X3=tdc(time,X3))
+  head(df)
+  split<-split(df, f = df$id>=80) 
+  train <-split$`FALSE`
+  test <-split$`TRUE`
+  dftrain <-train
+  dftest <- test
+  surv_train <- dftrain$stop
+  cen_train <- dftrain$status
+  surv_test <- dftest$stop
+  cen_test <- dftest$status
+  ## Cox Model
+  s_extract <- function(summary_entry){
+    separate(as_tibble(summary_entry),
+             sep = ":",
+             col = value, 
+             remove = FALSE, 
+             into = c("bad", "good"))[[3]] %>% 
+      as.numeric() 
+  }
+  
+  Deep = list()
+  CoxM =list()
+  coxmodel<-cph(Surv(time = tstart, time2 = tstop, event = status) ~ X1+X2+X3+cluster(id)
+                , data =df, x=T, y=T) 
+  valecox<-summary(validate(coxmodel,method="boot", B=50,dxy=TRUE))
+  valecox<-s_extract(valecox[4,3])
+  ###
+  qt<-c(40,100,300,500)
+  pseudo <- pseudosurv(time=dftrain$stop,event=dftrain$status,tmax=qt)
+  
+  btrain <- NULL
+  for(it in 1:length(pseudo$time)){
+    btrain <- rbind(btrain,cbind(dftrain,pseudo = pseudo$pseudo[,it],
+                                 tpseudo = pseudo$time[it],id=1:nrow(dftrain)))
+  }
+  dftrain <- btrain
+  x_train <- dftrain[,c(6,7,11)]
+  x_test <- dftest[,c(6,7,11)]
+  
+  # Normalise covariates
+  mean <- apply(as.matrix(x_train[,c(2,3)]), 2, mean)
+  std <- apply(as.matrix(x_train[,c(2,3)]), 2, sd)
+  x_train[,c(2,3)] <- scale(x_train[,c(2,3)], center = mean, scale = std)
+  
+  #x_test<-test[,c(6,7,11)]
+  # create dummy variables for the time points
+  smatrix=model.matrix(~as.factor(btrain$tpseudo)+0)
+  
+  #create input predictors 
+  x_train.all <- cbind(x_train, smatrix)
+  x_train.all<-as.matrix(x_train.all)
+  # Isolate the Y
+  y_train.all <- btrain$pseudo
+  
+  # Train the model
+  
+  model = pseudoDNN.train(x_train.all, y_train.all)
+  
+ 
+  # Normalise X_test
+  mean <- apply(as.matrix(x_test[,c(2,3)]), 2, mean)
+  std <- apply(as.matrix(x_test[,c(2,3)]), 2, sd)
+  x_test[,c(2,3)] <- scale(x_test[,c(2,3)], center = mean, scale = std)
+    x_test.all=do.call(rbind, replicate(length(qt), as.matrix(x_test), simplify=FALSE))
+  s_test=rep(qt,each=nrow(x_test))
+   smatrix.test=model.matrix(~as.factor(s_test)+0)
+  x_test.all=cbind(x_test.all,smatrix.test)
+  ypred.con <- pseudoDNN.predict(model, x_test.all)
+  
+  # obtain the marginal survival probability by multiple series of conditional probabilities
+  ypred.con <- matrix(ypred.con, nrow=nrow(x_test))
+  ypred <- lapply(1:length(qt), function(i) apply(ypred.con[,1:i, drop=FALSE], 1, prod))
+  surv_prob <- Reduce(cbind, ypred)
+  c_i<-concordance.index(x=1-surv_prob[,1], surv.time=surv_test, surv.event=cen_test, method="noether")$c.index
+  valcox <-(valecox)/2+0.5 
+  Deep<-c(Deep, c_i)
+  CoxM<-c(CoxM,valcox)
+  c(Deep, CoxM,seed)
+}
+
+simulate_trial <- function(n_sims, seed) {
+  set.seed(seed)
+  results <- replicate(n_sims, simulate_data(seed))
+  data.frame(t(results))
+}
+build_design_matrix <- function(initial_seed, num_seeds) {
+  set.seed(initial_seed)
+  seeds <- sample.int(100000, num_seeds)
+  design <- expand.grid(
+    seed = seeds
+  )
+}
+n_sims <- 200 # At each sample size we repeat n_sims times
+setup_seed <-5  # 
+n_seeds <- 5# trying the experiment at several number of seeds
+design <- build_design_matrix(setup_seed, n_seeds)
+results <- design %>%
+  rowwise() %>%do(simulate_trial(n_sims,.$seed))
+
+Results<-cbind(results)
+colnames(Results)<-c("Deep","CoxM","Seed")
+write_csv(Results, file="Scenario1_update.csv")
+#install.packages("xlsx")
+library(xlsx)
+write.xlsx(Results, file = "Scenario1_update.xlsx",
+      sheetName = "Scenario4_update", append = FALSE)
+```
